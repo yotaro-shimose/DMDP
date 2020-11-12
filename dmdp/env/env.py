@@ -4,10 +4,10 @@ Once instances are created, all of the process(step, reset) must be compiled by 
 integer programming.
 """
 import tensorflow as tf
-from dmdp.functions import int_not, int_and, int_xor
+from dmdp.env.functions import int_not, int_and, int_xor
 
 
-class DMDP(tf.Module):
+class DMDPEnv(tf.Module):
     """DMDP simulator class.
     Make sure simulator inherit tf.Module so that variables are properly managed.
 
@@ -77,6 +77,7 @@ class DMDP(tf.Module):
         self.n_clients = n_clients
         self.n_parkings = n_parkings
 
+    # @tf.function
     def step(self, actions: tf.Tensor):
         """step function
 
@@ -140,11 +141,13 @@ class DMDP(tf.Module):
         rewards = tf.cast(int_not(self.dones), tf.float32) * cost * (-1)
 
         # Calculate is_terminals
-        # B, N
-        non_parkings = self.depo_flags + self.client_flags
         # B
-        is_terminals = int_not(tf.reduce_sum(
-            self.counts * non_parkings - non_parkings, axis=-1)) == 0
+        finished_clients = tf.cast(tf.reduce_sum(self.counts * self.client_flags, -1) -
+                                   tf.reduce_sum(self.client_flags, axis=-1) == 0, dtype=tf.int32)
+        # B
+        arrived_depo = tf.reduce_prod(
+            tf.cast(self.depo_flags == one_hot_actions, tf.int32), axis=1)
+        is_terminals = int_and(finished_clients, arrived_depo)
         # Update done (must be done after reward calculation)
         self.dones.assign(tf.cast(is_terminals, tf.int32))
 
@@ -160,6 +163,7 @@ class DMDP(tf.Module):
 
         return [graphs, self.times, status, masks, rewards, is_terminals]
 
+    @tf.function
     def reset(self):
         self.coordinates.assign(tf.random.uniform(self.coordinates.shape))
         ones = tf.ones(self.client_flags.shape, dtype=tf.int32)
@@ -237,6 +241,7 @@ class DMDP(tf.Module):
         4. You can not go to depo when haven't visited all of the client nodes.
         5. You can not go to same parking node more than twice.
         6. You can not go to same client node more then once.
+        7. You can not stay on a same node twice in a row.
 
         all of sub masks are tensors with shape B and dtype tf.int32.
 
@@ -267,13 +272,18 @@ class DMDP(tf.Module):
         # 6.
         never_deliver_twice = int_not(
             int_and(self.client_flags, tf.cast(self.counts >= 1, tf.int32)))
+        # 7.
+        never_stay = int_not(tf.one_hot(
+            self.currents, depth=self.n_nodes, dtype=tf.int32))
+
         return\
             client_by_walk *\
             never_leave_vehicle *\
             bring_back_vehicle *\
             finish_all_clients *\
             never_park_twice *\
-            never_deliver_twice
+            never_deliver_twice *\
+            never_stay
 
     def _get_cord(self, indices: tf.Tensor):
         """get cordinates corresponding to indices

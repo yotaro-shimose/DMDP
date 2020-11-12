@@ -1,4 +1,4 @@
-from dmdp.env import DMDP
+from dmdp.env.env import DMDPEnv
 import tensorflow as tf
 import networkx as nx
 import numpy as np
@@ -8,10 +8,13 @@ import matplotlib.pyplot as plt
 LABEL_LIST = ["C", "P", "D"]
 
 
-def render(G, pos, current, next):
-    G.add_edge(current, next)
+def render(G, pos):
     nx.draw(G, pos, with_labels=True)
     plt.show()
+
+
+def add_node(G, current, next):
+    G.add_edge(current, next)
 
 
 def reset_graph(graph, labels):
@@ -28,7 +31,7 @@ def reset_graph(graph, labels):
 
 
 if __name__ == '__main__':
-    env = DMDP(batch_size=1, n_clients=3, n_parkings=6)
+    env = DMDPEnv(batch_size=1, n_clients=3, n_parkings=6)
     graph, times, status, mask = env.reset()
     graph = graph[0].numpy()
     labels = np.argmax(graph[:, 4:7], axis=1)
@@ -37,8 +40,15 @@ if __name__ == '__main__':
     is_terminal = tf.constant([False])
     while not is_terminal[0]:
         current = status[0][0].numpy()
-        action = int(input("come on!"))
-        render(G, pos, labels[current] + str(current),
-               labels[action] + str(action))
+        commands = list(map(int, input().split()))
+        action = int(commands[0])
+        if len(commands) > 1:
+            verbose = commands[1]
+        else:
+            verbose = False
         action = tf.constant([action], dtype=tf.int32)
         graph, time, status, mask, reward, is_terminal = env.step(action)
+        add_node(G, labels[current] + str(current),
+                 labels[commands[0]] + str(commands[0]))
+        if verbose:
+            render(G, pos)
