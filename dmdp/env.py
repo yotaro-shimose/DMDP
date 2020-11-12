@@ -1,6 +1,7 @@
 """
 Delivery Markov Decision Process Simulator.
-Once instances are created, all of the process can be compiled by tf.function using integer programming.
+Once instances are created, all of the process(step, reset) must be compiled by tf.function using
+integer programming.
 """
 import tensorflow as tf
 from dmdp.functions import int_not, int_and, int_xor
@@ -31,7 +32,6 @@ class DMDP(tf.Module):
         # 1 for depo
         n_nodes = n_clients + n_parkings + 1
         # Per instance variables
-        # GRAPH
         # B, N, 2 (2 for x, y)
         self.coordinates = tf.Variable(
             tf.zeros((batch_size, n_nodes, 2), dtype=tf.float32))
@@ -47,9 +47,11 @@ class DMDP(tf.Module):
         # B, N
         self.client_flags = tf.Variable(
             tf.zeros((batch_size, n_nodes), dtype=tf.int32))
+        # B, N
+        self.last_masks = tf.Variable(
+            tf.zeros((batch_size, n_nodes), dtype=tf.int32))
 
         # Per step variables
-        # B, N
         self.counts = tf.Variable(
             tf.zeros((batch_size, n_nodes), dtype=tf.int32))
         # STATUS
@@ -62,7 +64,7 @@ class DMDP(tf.Module):
         # B
         self.dones = tf.Variable(tf.zeros((batch_size,), dtype=tf.int32))
         # B
-        self.vehicle_parked = tf.Variables(
+        self.vehicle_parked = tf.Variable(
             tf.zeros((batch_size), dtype=tf.int32))
 
         # scalars
@@ -82,14 +84,20 @@ class DMDP(tf.Module):
             actions (tf.Tensor): B
         """
         # B, N
-        one_hot_actions = tf.one_hot(actions, depth=self.n_nodes)
+        one_hot_actions = tf.one_hot(
+            actions, depth=self.n_nodes, dtype=tf.int32)
+
+        # Validate actions
+        tf.assert_equal(tf.reduce_sum(self.last_masks * one_hot_actions,
+                                      axis=-1), tf.ones((self.batch_size,), dtype=tf.int32))
 
         # B
         distances = tf.norm(self._get_cord(actions) -
                             self._get_cord(self.currents), axis=1)
         # B
-        verocities = self.on_vehicles * self.vehicle_verocity + \
-            int_not(self.on_vehicles) * self.walking_verocity
+        verocities = tf.cast(self.on_vehicles, tf.float32) * self.vehicle_verocity + \
+            tf.cast(int_not(self.on_vehicles), tf.float32) * \
+            self.walking_verocity
         # B
         times_elapsed = distances / verocities
         # B
@@ -98,13 +106,13 @@ class DMDP(tf.Module):
         # Calculate wait and delay
         # B
         start = tf.reduce_sum(
-            one_hot_actions * self.time_constrained[:, :, 0], axis=-1)
+            tf.cast(one_hot_actions, tf.float32) * self.time_constraints[:, :, 0], axis=-1)
         # B
         waits = tf.maximum(tf.zeros(self.times.shape),
                            start - new_times)
         # B
         end = tf.reduce_sum(
-            one_hot_actions * self.time_constrained[:, :, 1], axis=-1)
+            tf.cast(one_hot_actions, tf.float32) * self.time_constraints[:, :, 1], axis=-1)
         # B
         delays = tf.maximum(tf.zeros(self.times.shape),
                             new_times - end)
@@ -126,35 +134,32 @@ class DMDP(tf.Module):
         # B
         status_change = tf.reduce_sum(
             self.parking_flags * one_hot_actions, axis=-1)
-        self.on_vehicles.assign(int_xor(self.on_vehicles + status_change))
+        self.on_vehicles.assign(int_xor(self.on_vehicles, status_change))
 
         # Calculate reward (0 for already done instances)
         # B
-        rewards = int_not(self.done) * cost * (-1)
+        rewards = tf.cast(int_not(self.dones), tf.float32) * cost * (-1)
 
         # Calculate is_terminals
         # B, N
         non_parkings = self.depo_flags + self.client_flags
         # B
-        is_terminals = tf.cast(tf.reduce_sum(
-            self.counts * non_parkings, axis=1) - tf.reduce_sum(non_parkings, axis=1), tf.bool)
+        is_terminals = int_not(tf.reduce_sum(
+            self.counts * non_parkings - non_parkings, axis=-1)) == 0
         # Update done (must be done after reward calculation)
         self.dones.assign(tf.cast(is_terminals, tf.int32))
 
+        # B, N
         masks = self._get_mask()
+        self.last_masks.assign(masks)
 
-        # Return graph, status, (don't forget stop_gradient!)
-        # B, N, 3
-        categories = tf.stack(
-            [self.client_flags, self.parking_flags, self.depo_flags], axis=-1)
-        # B, N, (2 + 2 + 3)
-        graphs = tf.concat(
-            [self.coordinates, self.time_constraints, categories], axis=-1)
+        # B, N, (2 + 2 + 3 + 1)
+        graphs = self._get_graph()
+
         # B, 3
-        status = tf.stack(
-            [self.currents, self.times, self.on_vehicles], axis=-1)
+        status = self._get_status()
 
-        return [graphs, status, masks, rewards, is_terminals]
+        return [graphs, self.times, status, masks, rewards, is_terminals]
 
     def reset(self):
         self.coordinates.assign(tf.random.uniform(self.coordinates.shape))
@@ -190,8 +195,38 @@ class DMDP(tf.Module):
         self.vehicle_parked.assign(
             tf.ones(self.batch_size, dtype=tf.int32) * (self.n_nodes - 1))
 
-        # TODO Return States
-        return
+        # B, N
+        masks = self._get_mask()
+
+        # B, N, (2 + 2 + 3 + 1)
+        graphs = self._get_graph()
+
+        # B, 3
+        status = self._get_status()
+
+        return [graphs, self.times, status, masks]
+
+    def _get_graph(self):
+        # B, N, 3
+        categories = tf.stack(
+            [self.client_flags, self.parking_flags, self.depo_flags], axis=-1)
+        categories = tf.cast(categories, tf.float32)
+        # B, N
+        count_one = self.counts >= 1
+        count_two = self.counts >= 2
+        # B, N, 2
+        counts = tf.stack([count_one, count_two], axis=-1)
+        counts = tf.cast(counts, tf.float32)
+        # B, N, (2 + 2 + 3 + 1)
+        graphs = tf.concat(
+            [self.coordinates, self.time_constraints, categories, counts], axis=-1)
+        return graphs
+
+    def _get_status(self):
+        # B, 3
+        status = tf.stack(
+            [self.currents, self.on_vehicles, self.vehicle_parked], axis=-1)
+        return status
 
     def _get_mask(self):
         """Mask consisting of True for nodes you can visit next and False otherwise.
@@ -208,18 +243,32 @@ class DMDP(tf.Module):
         """
 
         # 1.
-        client_by_walk = int_not(int_and(self.client_flags, self.on_vehicle))
+        client_by_walk = int_not(
+            int_and(self.client_flags, tf.expand_dims(self.on_vehicles, -1)))
         # 2.
         never_leave_vehicle = int_not(
-            int_and(int_not(self.vehicle_parked), self.parking_flags))
+            int_and(self.parking_flags, tf.expand_dims(int_not(self.vehicle_parked), -1)))
         # 3.
         bring_back_vehicle = int_not(
-            int_and(self.depo_flags, int_not(self.on_vehicles)))
+            int_and(self.depo_flags, tf.expand_dims(int_not(self.on_vehicles), -1)))
         # 4.
         finished_clients = int_not(tf.reduce_sum(
             self.counts * self.client_flags, axis=-1) - tf.reduce_sum(self.client_flags, axis=-1))
-        finish_all_clients = int_not(self.depo_flags, finished_clients)
+        finish_all_clients = int_not(
+            int_and(self.depo_flags, tf.expand_dims(finished_clients, -1)))
         # 5.
+        never_park_twice = int_not(int_and(
+            self.parking_flags, tf.cast(self.counts >= 2, tf.int32)))
+        # 6.
+        never_deliver_twice = int_not(
+            int_and(self.client_flags, tf.cast(self.counts >= 1, tf.int32)))
+        return \
+            client_by_walk *\
+            never_leave_vehicle *\
+            bring_back_vehicle *\
+            finish_all_clients *\
+            never_park_twice *\
+            never_deliver_twice
 
     def _get_cord(self, indices: tf.Tensor):
         """get cordinates corresponding indices

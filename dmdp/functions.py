@@ -16,4 +16,4 @@ def int_not(x: tf.Tensor):
 
 
 def int_xor(x: tf.Tensor, y: tf.Tensor):
-    return tf.mod(x + y, 2)
+    return tf.math.mod(x + y, 2)

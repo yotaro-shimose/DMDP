@@ -1,0 +1,8 @@
+# vscode
+.vscode
+
+# tempfile
+temp*
+
+# pycache
+__pycache__
