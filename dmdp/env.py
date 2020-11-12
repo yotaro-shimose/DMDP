@@ -88,8 +88,7 @@ class DMDP(tf.Module):
             actions, depth=self.n_nodes, dtype=tf.int32)
 
         # Validate actions
-        tf.assert_equal(tf.reduce_sum(self.last_masks * one_hot_actions,
-                                      axis=-1), tf.ones((self.batch_size,), dtype=tf.int32))
+        tf.assert_equal(self.last_masks * one_hot_actions, one_hot_actions)
 
         # B
         distances = tf.norm(self._get_cord(actions) -
@@ -128,7 +127,7 @@ class DMDP(tf.Module):
         self.currents.assign(actions)
         # Update vehicle parking nodes(if new node if on vehicle and previous node otherwise)
         self.vehicle_parked.assign(
-            self.on_vehicles * actions + int_not(self.on_vehicles * self.vehicle_parked))
+            self.on_vehicles * actions + int_not(self.on_vehicles) * self.vehicle_parked)
 
         # Update vehicle status (must be done after cost calculation!)
         # B
@@ -197,6 +196,7 @@ class DMDP(tf.Module):
 
         # B, N
         masks = self._get_mask()
+        self.last_masks.assign(masks)
 
         # B, N, (2 + 2 + 3 + 1)
         graphs = self._get_graph()
@@ -246,23 +246,28 @@ class DMDP(tf.Module):
         client_by_walk = int_not(
             int_and(self.client_flags, tf.expand_dims(self.on_vehicles, -1)))
         # 2.
-        never_leave_vehicle = int_not(
-            int_and(self.parking_flags, tf.expand_dims(int_not(self.vehicle_parked), -1)))
+        # parking and not parked
+        # B, N
+        non_vehicle_parkings = int_and(self.parking_flags, int_not(
+            tf.one_hot(self.vehicle_parked, depth=self.n_nodes, dtype=tf.int32)))
+        never_leave_vehicle = int_not(int_and(tf.expand_dims(int_not(self.on_vehicles), -1),
+                                              int_and(self.parking_flags, non_vehicle_parkings)))
         # 3.
         bring_back_vehicle = int_not(
             int_and(self.depo_flags, tf.expand_dims(int_not(self.on_vehicles), -1)))
         # 4.
-        finished_clients = int_not(tf.reduce_sum(
-            self.counts * self.client_flags, axis=-1) - tf.reduce_sum(self.client_flags, axis=-1))
+        not_finished_clients = tf.cast(tf.reduce_sum(
+            self.counts * self.client_flags, -1) - tf.reduce_sum(self.client_flags, axis=-1) < 0,
+            dtype=tf.int32)
         finish_all_clients = int_not(
-            int_and(self.depo_flags, tf.expand_dims(finished_clients, -1)))
+            int_and(self.depo_flags, tf.expand_dims(not_finished_clients, -1)))
         # 5.
         never_park_twice = int_not(int_and(
             self.parking_flags, tf.cast(self.counts >= 2, tf.int32)))
         # 6.
         never_deliver_twice = int_not(
             int_and(self.client_flags, tf.cast(self.counts >= 1, tf.int32)))
-        return \
+        return\
             client_by_walk *\
             never_leave_vehicle *\
             bring_back_vehicle *\
@@ -271,7 +276,7 @@ class DMDP(tf.Module):
             never_deliver_twice
 
     def _get_cord(self, indices: tf.Tensor):
-        """get cordinates corresponding indices
+        """get cordinates corresponding to indices
 
         Args:
             indices (tf.Tensor): B
@@ -289,7 +294,7 @@ class DMDP(tf.Module):
             (self.batch_size, self.n_nodes), 0, n_options), depth=n_options, axis=0)
         randint = tf.expand_dims(randint, -1)
         randint = tf.tile(randint, [1, 1, 1, 2])
-        return tf.reduce_sum(randint * time_options, axis=0) * \
+        return tf.reduce_sum(randint * time_options, axis=0) *\
             tf.expand_dims(tf.cast(client_flags, tf.float32), -1)
 
     @ tf.function
