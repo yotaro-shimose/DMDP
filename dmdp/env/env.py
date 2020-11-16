@@ -4,7 +4,7 @@ Once instances are created, all of the process(step, reset) must be compiled by 
 integer programming.
 """
 import tensorflow as tf
-from dmdp.env.functions import int_not, int_and, int_xor
+from dmdp.modules.functions import int_not, int_and, int_xor
 
 
 class DMDPEnv(tf.Module):
@@ -67,6 +67,21 @@ class DMDPEnv(tf.Module):
         self.vehicle_parked = tf.Variable(
             tf.zeros((batch_size), dtype=tf.int32))
 
+        self.state_dict = {
+            'coordinates': self.coordinates,
+            'time_constraints': self.time_constraints,
+            'parking_flags': self.parking_flags,
+            'depo_flags': self.depo_flags,
+            'client_flags': self.client_flags,
+            'last_masks': self.last_masks,
+            'counts': self.counts,
+            'currents': self.currents,
+            'times': self.times,
+            'on_vehicles': self.on_vehicles,
+            'dones': self.dones,
+            'vehicle_parked': self.vehicle_parked
+        }
+
         # scalars
         self.walking_verocity = tf.constant(walking_verocity, dtype=tf.float32)
         self.vehicle_verocity = tf.constant(vehicle_verocity, dtype=tf.float32)
@@ -77,7 +92,7 @@ class DMDPEnv(tf.Module):
         self.n_clients = n_clients
         self.n_parkings = n_parkings
 
-    # @tf.function
+    @tf.function
     def step(self, actions: tf.Tensor):
         """step function
 
@@ -87,9 +102,18 @@ class DMDPEnv(tf.Module):
         # B, N
         one_hot_actions = tf.one_hot(
             actions, depth=self.n_nodes, dtype=tf.int32)
+        # B, N
+        ones = tf.ones(one_hot_actions.shape, dtype=tf.int32)
+
+        # filter actions by mask, which should not do anything
+        # if actions are valid (unless it's done).
+        # B, N
+        filtered_actions = self._ignore_done(
+            ones, self.last_masks * one_hot_actions)
+        non_filtered_actions = self._ignore_done(ones, one_hot_actions)
 
         # Validate actions
-        tf.assert_equal(self.last_masks * one_hot_actions, one_hot_actions)
+        tf.assert_equal(filtered_actions, non_filtered_actions)
 
         # B
         distances = tf.norm(self._get_cord(actions) -
@@ -151,17 +175,11 @@ class DMDPEnv(tf.Module):
         # Update done (must be done after reward calculation)
         self.dones.assign(tf.cast(is_terminals, tf.int32))
 
-        # B, N
-        masks = self._get_mask()
+        # (B, N), (B,), (B, N, 2 + 2 + 3 + 1), (B, 3)
+        graphs, times, status, masks = self.get_states()
         self.last_masks.assign(masks)
 
-        # B, N, (2 + 2 + 3 + 1)
-        graphs = self._get_graph()
-
-        # B, 3
-        status = self._get_status()
-
-        return [graphs, self.times, status, masks, rewards, is_terminals]
+        return [[graphs, times, status, masks], rewards, is_terminals]
 
     @tf.function
     def reset(self):
@@ -198,9 +216,14 @@ class DMDPEnv(tf.Module):
         self.vehicle_parked.assign(
             tf.ones(self.batch_size, dtype=tf.int32) * (self.n_nodes - 1))
 
+        # (B, N), (B,), (B, N, 2 + 2 + 3 + 1), (B, 3)
+        states = _, _, _, masks = self.get_states()
+        self.last_masks.assign(masks)
+        return states
+
+    def get_states(self):
         # B, N
         masks = self._get_mask()
-        self.last_masks.assign(masks)
 
         # B, N, (2 + 2 + 3 + 1)
         graphs = self._get_graph()
@@ -208,7 +231,7 @@ class DMDPEnv(tf.Module):
         # B, 3
         status = self._get_status()
 
-        return [graphs, self.times, status, masks]
+        return [graphs, tf.identity(self.times), status, masks]
 
     def _get_graph(self):
         # B, N, 3
@@ -251,7 +274,7 @@ class DMDPEnv(tf.Module):
         client_by_walk = int_not(
             int_and(self.client_flags, tf.expand_dims(self.on_vehicles, -1)))
         # 2.
-        # parking and not parked
+        # parking node without vehicle
         # B, N
         non_vehicle_parkings = int_and(self.parking_flags, int_not(
             tf.one_hot(self.vehicle_parked, depth=self.n_nodes, dtype=tf.int32)))
@@ -315,3 +338,70 @@ class DMDPEnv(tf.Module):
         uniform = self.rand_generator.uniform(
             shape=shape, minval=min, maxval=max)
         return tf.cast(tf.floor(uniform), tf.int32)
+
+    def _ignore_done(self, target: tf.Tensor, assignment: tf.Tensor):
+        """_ignore_done returns tensor filled with target's value for done instances
+        and with assignment's value for undone instances
+
+        Args:
+            target (tf.Tensor): value to fill done instances
+            assignment (tf.Tensor): value to fill undone instances
+
+        Returns:
+            [type]: [description]
+        """
+
+        if tf.rank(self.dones) < tf.rank(target):
+            dones = tf.expand_dims(self.dones, -1)
+        else:
+            dones = self.dones
+
+        return target * dones + assignment * int_not(dones)
+
+    def import_states(
+        self,
+        states: dict
+    ):
+        # Per instance variables
+        # B, N, 2 (2 for x, y)
+        self.coordinates.assign(states['coordinates'])
+        # B, N, 2 (2 for time start and time end)
+        self.time_constraints.assign(states['time_constraints'])
+        # B, N
+        self.parking_flags.assign(states['parking_flags'])
+        # B, N
+        self.depo_flags.assign(states['depo_flags'])
+        # B, N
+        self.client_flags.assign(states['client_flags'])
+        # B, N
+        self.last_masks.assign(states['last_masks'])
+
+        # Per step variables
+        self.counts.assign(states['counts'])
+        # STATUS
+        # B
+        self.currents.assign(states['currents'])
+        # B
+        self.times.assign(states['times'])
+        # B
+        self.on_vehicles.assign(states['on_vehicles'])
+        # B
+        self.dones.assign(states['dones'])
+        # B
+        self.vehicle_parked.assign(states['vehicle_parked'])
+
+    def export_states(self):
+        return {
+            'coordinates': tf.identity(self.coordinates),
+            'time_constraints': tf.identity(self.time_constraints),
+            'parking_flags': tf.identity(self.parking_flags),
+            'depo_flags': tf.identity(self.depo_flags),
+            'client_flags': tf.identity(self.client_flags),
+            'last_masks': tf.identity(self.last_masks),
+            'counts': tf.identity(self.counts),
+            'currents': tf.identity(self.currents),
+            'times': tf.identity(self.times),
+            'on_vehicles': tf.identity(self.on_vehicles),
+            'dones': tf.identity(self.dones),
+            'vehicle_parked': tf.identity(self.vehicle_parked)
+        }

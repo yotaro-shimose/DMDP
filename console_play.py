@@ -47,7 +47,7 @@ if __name__ == '__main__':
         else:
             verbose = False
         action = tf.constant([action], dtype=tf.int32)
-        graph, time, status, mask, reward, is_terminal = env.step(action)
+        [graph, time, status, mask], reward, is_terminal = env.step(action)
         add_node(G, labels[current] + str(current),
                  labels[commands[0]] + str(commands[0]))
         if verbose:

@@ -9,13 +9,13 @@ import tensorflow as tf
 
 
 def raise_error_at_last(env, actions):
-    graph, times, status, mask = env.reset()
+    _ = env.reset()
     answer = False
     for i in range(len(actions)):
         try:
             action = actions[i]
             action = tf.constant([action], dtype=tf.int32)
-            graph, time, status, mask, reward, is_terminal = env.step(action)
+            states, reward, is_terminal = env.step(action)
         except tf.errors.InvalidArgumentError:
             if i == len(actions) - 1:
                 answer = True
@@ -25,13 +25,13 @@ def raise_error_at_last(env, actions):
 
 
 def complete_synario(env, actions):
-    graph, time, status, mask = env.reset()
+    _ = env.reset()
     answer = False
     for i in range(len(actions)):
         try:
             action = actions[i]
             action = tf.constant([action], dtype=tf.int32)
-            graph, time, status, mask, reward, is_terminal = env.step(action)
+            states, reward, is_terminal = env.step(action)
         except tf.errors.InvalidArgumentError:
             break
     else:
@@ -41,7 +41,6 @@ def complete_synario(env, actions):
 
 def test_env_mask():
     env = DMDPEnv(batch_size=1, n_clients=3, n_parkings=6)
-    graph, times, status, mask = env.reset()
     # 1. You can not go to client nodes by vehicle.
     actions = [5, 1, 5, 0]
     assert raise_error_at_last(env, actions)
